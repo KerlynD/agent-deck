@@ -10,7 +10,8 @@ import { alpha, MONO } from "../ui-kit";
 import { FOCUS_FRESH_MS, useNotebookEvents } from "./events";
 import { linkify, noteHref, type Segment, segments, stripPreamble } from "./obsidian";
 
-const KEY = "deck-notebook";
+/** Shared with the concept map, so invalidating it refreshes both. */
+const KEY = ["deck", "notebook"] as const;
 const POLL_MS = 20_000;
 /** Below this width the notebook shows the list or the reader, not both. */
 const NARROW = 640;
@@ -72,7 +73,7 @@ export function NotebookView({ theme, compact, id: requested, openMap }: Noteboo
   const queryClient = useQueryClient();
   const listRpc = useRpc(notebookListRpc);
   const list = useQuery({
-    queryKey: [KEY, "list"],
+    queryKey: [...KEY, "list"],
     queryFn: () => listRpc({}),
     refetchOnWindowFocus: true,
     refetchInterval: POLL_MS,
@@ -91,7 +92,7 @@ export function NotebookView({ theme, compact, id: requested, openMap }: Noteboo
   const mountedAt = useRef(Date.now());
   const events = useNotebookEvents();
   useEffect(() => {
-    if (events.pins > 0) void queryClient.invalidateQueries({ queryKey: [KEY] });
+    if (events.pins > 0) void queryClient.invalidateQueries({ queryKey: KEY });
   }, [events.pins, queryClient]);
   useEffect(() => {
     if (events.focus && events.focus.at > mountedAt.current - FOCUS_FRESH_MS) setSelected(events.focus.id);
@@ -130,7 +131,7 @@ export function NotebookView({ theme, compact, id: requested, openMap }: Noteboo
       vault={list.data?.vault}
       loading={list.isPending}
       error={list.isError ? errorText(list.error) : null}
-      onRefresh={() => void queryClient.invalidateQueries({ queryKey: [KEY] })}
+      onRefresh={() => void queryClient.invalidateQueries({ queryKey: KEY })}
     />
   );
   const reader = active ? (
@@ -389,7 +390,7 @@ function Reader({
   const now = useNow();
   const readRpc = useRpc(notebookReadRpc);
   const read = useQuery({
-    queryKey: [KEY, "read", id],
+    queryKey: [...KEY, "read", id],
     queryFn: () => readRpc({ id }),
     refetchOnWindowFocus: true,
     refetchInterval: POLL_MS,
@@ -607,7 +608,7 @@ function Embed({ theme, from, target }: { theme: PluginTheme; from: string; targ
   const file = target.split("|")[0]!.trim();
   const assetRpc = useRpc(notebookAssetRpc);
   const asset = useQuery({
-    queryKey: [KEY, "asset", from, file],
+    queryKey: [...KEY, "asset", from, file],
     queryFn: () => assetRpc({ from, target: file }),
     staleTime: 5 * 60_000,
     retry: false,
