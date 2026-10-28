@@ -21,8 +21,10 @@ export const deckSettings = defineSettings({
     chatLearning: z.boolean().default(true),
     /** Teach new agents the learning block formats through their system prompt. */
     learningPrompt: z.boolean().default(true),
-    /** Notebook vault folder. Empty: ~/Documents/Paseo Notebook. */
+    /** Notebook vault folder, usually an Obsidian vault or a folder inside one. Empty: ~/Documents/Paseo Notebook. */
     notebookPath: z.string().default(""),
+    /** Point new agents at the vault and copy its CLAUDE.md learning rules into their system prompt. */
+    vaultInstructions: z.boolean().default(true),
     // Rice (desktop and web only)
     riceSquare: z.boolean().default(true),
     riceMono: z.boolean().default(true),

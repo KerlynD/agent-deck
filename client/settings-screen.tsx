@@ -65,9 +65,10 @@ export function DeckSettingsScreen({ theme }: PluginSurfaceProps) {
         <SettingsCard>
           {toggle("chatLearning", "Learning blocks", "Callouts, quizzes, flashcards, steps and comparisons render as cards")}
           {toggle("learningPrompt", "Teach agents the formats", "Adds the learning block formats to new agents' system prompt")}
+          {toggle("vaultInstructions", "Follow the vault's CLAUDE.md", "Tells new agents where the vault is and copies its formatting and learning rules into their system prompt")}
           <SettingsInput
             label="Notebook folder"
-            hint="Where pinned notes are saved as markdown. Empty uses ~/Documents/Paseo Notebook"
+            hint="An Obsidian vault or a folder in one. Pins are saved into its notes. Empty uses ~/Documents/Paseo Notebook"
             initialValue={values.notebookPath}
             placeholder="~/Documents/Paseo Notebook"
             disabled={settings.saving}
