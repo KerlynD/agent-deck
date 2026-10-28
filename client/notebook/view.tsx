@@ -1,14 +1,14 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin/client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import { notebookListRpc, notebookReadRpc, slugify, type TopicSummary } from "../../shared/notebook";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ActivityIndicator, Image, Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { notebookAssetRpc, notebookListRpc, notebookReadRpc, type NoteSummary } from "../../shared/notebook";
 import { formatAge, useNow } from "../format";
 import { Markdown } from "../markdown";
 import { alpha, MONO } from "../ui-kit";
-import { useNotebookEvents } from "./events";
-import { linkTopics, splitSections, topicTarget } from "./text";
+import { FOCUS_FRESH_MS, useNotebookEvents } from "./events";
+import { linkify, noteHref, type Segment, segments, stripPreamble } from "./obsidian";
 
 const KEY = "deck-notebook";
 const POLL_MS = 20_000;
@@ -18,10 +18,9 @@ const NARROW = 640;
 export interface NotebookViewProps {
   theme: PluginTheme;
   compact: boolean;
-  /** Topic to show first, such as a screen param. */
-  slug?: string;
-  openMap(slug: string): void;
-  openAgent?(agentId: string): void;
+  /** Note to show first, such as a screen param. */
+  id?: string;
+  openMap(id: string): void;
 }
 
 function errorText(error: unknown): string {
@@ -45,18 +44,13 @@ function useStyles(theme: PluginTheme) {
         borderColor: c.border,
       },
       title: { color: c.foreground, fontFamily: MONO, fontWeight: "700" as const, fontSize: 13 },
-      button: (on = false) => ({
+      button: {
         paddingHorizontal: 8,
         paddingVertical: 3,
         borderWidth: 1,
-        borderColor: on ? c.accent : c.border,
-        backgroundColor: on ? c.accent : "transparent",
-      }),
-      buttonText: (on = false) => ({
-        color: on ? c.accentForeground : c.foregroundMuted,
-        fontFamily: MONO,
-        fontSize: 12,
-      }),
+        borderColor: c.border,
+      },
+      buttonText: { color: c.foregroundMuted, fontFamily: MONO, fontSize: 12 },
       chip: (on: boolean) => ({
         paddingHorizontal: 6,
         paddingVertical: 1,
@@ -72,7 +66,7 @@ function useStyles(theme: PluginTheme) {
 
 type Styles = ReturnType<typeof useStyles>;
 
-export function NotebookView({ theme, compact, slug: requested, openMap, openAgent }: NotebookViewProps) {
+export function NotebookView({ theme, compact, id: requested, openMap }: NotebookViewProps) {
   const s = useStyles(theme);
   const c = s.c;
   const queryClient = useQueryClient();
@@ -94,43 +88,38 @@ export function NotebookView({ theme, compact, slug: requested, openMap, openAge
     if (requested) setSelected(requested);
   }, [requested]);
 
+  const mountedAt = useRef(Date.now());
   const events = useNotebookEvents();
   useEffect(() => {
     if (events.pins > 0) void queryClient.invalidateQueries({ queryKey: [KEY] });
   }, [events.pins, queryClient]);
   useEffect(() => {
-    if (events.focus) setSelected(events.focus.slug);
+    if (events.focus && events.focus.at > mountedAt.current - FOCUS_FRESH_MS) setSelected(events.focus.id);
   }, [events.focus]);
 
-  const topics = list.data?.topics ?? [];
+  const notes = list.data?.notes ?? [];
   const tags = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const t of topics) for (const g of t.tags) counts.set(g, (counts.get(g) ?? 0) + 1);
+    for (const n of notes) for (const g of n.tags) counts.set(g, (counts.get(g) ?? 0) + 1);
     return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([g]) => g);
-  }, [topics]);
+  }, [notes]);
   const shown = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return topics.filter(
-      (t) =>
-        (!tag || t.tags.includes(tag)) &&
-        (!q || t.title.toLowerCase().includes(q) || t.tags.some((g) => g.toLowerCase().includes(q))),
+    return notes.filter(
+      (n) =>
+        (!tag || n.tags.includes(tag)) &&
+        (!q || n.id.toLowerCase().includes(q) || n.tags.some((g) => g.toLowerCase().includes(q))),
     );
-  }, [topics, search, tag]);
+  }, [notes, search, tag]);
 
-  /** Wide layouts open the newest topic; narrow ones start at the list. */
-  const active = selected ?? (narrow ? null : (topics[0]?.slug ?? null));
-
-  const resolve = (target: string): string => {
-    const want = slugify(target);
-    return topics.find((t) => slugify(t.slug) === want || slugify(t.title) === want)?.slug ?? want;
-  };
+  /** Wide layouts open the newest note; narrow ones start at the list. */
+  const active = selected ?? (narrow ? null : (notes[0]?.id ?? null));
 
   const listPane = (
-    <TopicList
+    <NoteList
       s={s}
-      theme={theme}
-      topics={shown}
-      total={topics.length}
+      notes={shown}
+      total={notes.length}
       tags={tags}
       tag={tag}
       onTag={(g) => setTag((cur) => (cur === g ? null : g))}
@@ -148,12 +137,10 @@ export function NotebookView({ theme, compact, slug: requested, openMap, openAge
     <Reader
       s={s}
       theme={theme}
-      slug={active}
+      id={active}
       onBack={narrow ? () => setSelected(null) : undefined}
-      onTopic={(target) => setSelected(resolve(target))}
-      onSlug={setSelected}
+      onOpen={setSelected}
       openMap={openMap}
-      openAgent={openAgent}
     />
   ) : null;
 
@@ -163,26 +150,36 @@ export function NotebookView({ theme, compact, slug: requested, openMap, openAge
         (reader ?? listPane)
       ) : (
         <View style={{ flex: 1, flexDirection: "row" }}>
-          <View style={{ width: 300, borderRightWidth: 1, borderColor: c.border }}>{listPane}</View>
-          <View style={{ flex: 1 }}>
-            {reader ?? (
-              <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 24 }}>
-                <Text style={s.muted}>{topics.length > 0 ? "Pick a topic." : ""}</Text>
-              </View>
-            )}
-          </View>
+          <View style={{ width: 320, borderRightWidth: 1, borderColor: c.border }}>{listPane}</View>
+          <View style={{ flex: 1 }}>{reader}</View>
         </View>
       )}
     </View>
   );
 }
 
-// ── Topic list ───────────────────────────────────────────────────────────────
+// ── Note list ────────────────────────────────────────────────────────────────
 
-function TopicList({
+interface Group {
+  folder: string;
+  notes: NoteSummary[];
+}
+
+/** Folders, most recently touched first; map notes lead their folder. */
+function groupByFolder(notes: NoteSummary[]): Group[] {
+  const groups = new Map<string, NoteSummary[]>();
+  for (const n of notes) groups.set(n.folder, [...(groups.get(n.folder) ?? []), n]);
+  return [...groups.entries()]
+    .map(([folder, list]) => ({
+      folder,
+      notes: list.sort((a, b) => Number(b.isMap) - Number(a.isMap) || Date.parse(b.updated) - Date.parse(a.updated)),
+    }))
+    .sort((a, b) => Math.max(...b.notes.map((n) => Date.parse(n.updated))) - Math.max(...a.notes.map((n) => Date.parse(n.updated))));
+}
+
+function NoteList({
   s,
-  theme,
-  topics,
+  notes,
   total,
   tags,
   tag,
@@ -197,8 +194,7 @@ function TopicList({
   onRefresh,
 }: {
   s: Styles;
-  theme: PluginTheme;
-  topics: TopicSummary[];
+  notes: NoteSummary[];
   total: number;
   tags: string[];
   tag: string | null;
@@ -206,7 +202,7 @@ function TopicList({
   search: string;
   onSearch(q: string): void;
   active: string | null;
-  onOpen(slug: string): void;
+  onOpen(id: string): void;
   vault?: string;
   loading: boolean;
   error: string | null;
@@ -214,14 +210,25 @@ function TopicList({
 }) {
   const c = s.c;
   const now = useNow();
+  const [closed, setClosed] = useState<ReadonlySet<string>>(new Set());
+  const filtering = search.trim() !== "" || tag !== null;
+  const groups = useMemo(() => groupByFolder(notes), [notes]);
+  const toggle = (folder: string) =>
+    setClosed((prev) => {
+      const next = new Set(prev);
+      if (next.has(folder)) next.delete(folder);
+      else next.add(folder);
+      return next;
+    });
+
   return (
     <View style={{ flex: 1 }}>
       <View style={s.bar}>
         <Text style={s.title}>notebook</Text>
         <Text style={s.muted}>{total}</Text>
         <View style={{ flex: 1 }} />
-        <Pressable accessibilityRole="button" accessibilityLabel="Refresh notebook" onPress={onRefresh} style={s.button()}>
-          <Text style={s.buttonText()}>↻</Text>
+        <Pressable accessibilityRole="button" accessibilityLabel="Refresh notebook" onPress={onRefresh} style={s.button}>
+          <Text style={s.buttonText}>↻</Text>
         </Pressable>
       </View>
       {total > 0 ? (
@@ -231,17 +238,17 @@ function TopicList({
             <TextInput
               value={search}
               onChangeText={onSearch}
-              placeholder="filter topics"
+              placeholder="filter notes"
               placeholderTextColor={c.foregroundMuted}
               autoCapitalize="none"
               autoCorrect={false}
-              accessibilityLabel="Filter topics"
+              accessibilityLabel="Filter notes"
               style={{ flex: 1, color: c.foreground, fontFamily: MONO, fontSize: 12, paddingVertical: 5 }}
             />
           </View>
           {tags.length > 0 ? (
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 4 }}>
-              {tags.slice(0, 16).map((g) => (
+              {tags.slice(0, 14).map((g) => (
                 <Pressable
                   key={g}
                   accessibilityRole="button"
@@ -260,40 +267,67 @@ function TopicList({
 
       <ScrollView style={{ flex: 1 }}>
         {loading ? <ActivityIndicator color={c.accent} style={{ padding: 16 }} /> : null}
-        {error ? <Text style={[s.muted, { color: c.statusDanger, padding: 12 }]}>Couldn't read the notebook: {error}</Text> : null}
+        {error ? <Text style={[s.muted, { color: c.statusDanger, padding: 12 }]}>Couldn't read the vault: {error}</Text> : null}
         {!loading && !error && total === 0 ? <EmptyState s={s} vault={vault} /> : null}
-        {total > 0 && topics.length === 0 ? <Text style={[s.muted, { padding: 12 }]}>No topics match.</Text> : null}
-        {topics.map((t) => {
-          const on = t.slug === active;
+        {total > 0 && notes.length === 0 ? <Text style={[s.muted, { padding: 12 }]}>No notes match.</Text> : null}
+        {groups.map((group) => {
+          const open = filtering || !closed.has(group.folder);
           return (
-            <Pressable
-              key={t.slug}
-              accessibilityRole="button"
-              accessibilityState={{ selected: on }}
-              accessibilityLabel={`Open ${t.title}`}
-              onPress={() => onOpen(t.slug)}
-              style={({ pressed }) => ({
-                paddingHorizontal: 12,
-                paddingVertical: 7,
-                gap: 3,
-                borderLeftWidth: 2,
-                borderColor: on ? c.accent : "transparent",
-                backgroundColor: on ? alpha(c.accent, 0.12) : pressed ? c.surface2 : "transparent",
-              })}
-            >
-              <View style={{ flexDirection: "row", gap: 8, alignItems: "baseline" }}>
-                <Text numberOfLines={1} style={[s.text, { flex: 1, fontWeight: on ? "700" : "400" }]}>
-                  {t.title}
+            <View key={group.folder}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ expanded: open }}
+                accessibilityLabel={`${open ? "Collapse" : "Expand"} ${group.folder || "vault root"}`}
+                onPress={() => toggle(group.folder)}
+                style={({ pressed }) => ({
+                  flexDirection: "row",
+                  gap: 6,
+                  paddingHorizontal: 12,
+                  paddingVertical: 5,
+                  backgroundColor: pressed ? c.surface2 : alpha(c.surface2, 0.35),
+                })}
+              >
+                <Text style={[s.muted, { color: c.accent }]}>{open ? "▾" : "▸"}</Text>
+                <Text numberOfLines={1} style={[s.muted, { flex: 1, fontWeight: "700" }]}>
+                  {group.folder ? `${group.folder}/` : "/"}
                 </Text>
-                <Text style={s.muted}>{t.sections}§</Text>
-                <Text style={[s.muted, { minWidth: 36, textAlign: "right" }]}>{formatAge(t.updated, now)}</Text>
-              </View>
-              {t.tags.length > 0 ? (
-                <Text numberOfLines={1} style={[s.muted, { fontSize: 11 }]}>
-                  {t.tags.map((g) => `#${g}`).join(" ")}
-                </Text>
-              ) : null}
-            </Pressable>
+                <Text style={s.muted}>{group.notes.length}</Text>
+              </Pressable>
+              {open
+                ? group.notes.map((n) => {
+                    const on = n.id === active;
+                    return (
+                      <Pressable
+                        key={n.id}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected: on }}
+                        accessibilityLabel={`Open ${n.title}${n.isMap ? ", map note" : ""}`}
+                        onPress={() => onOpen(n.id)}
+                        style={({ pressed }) => ({
+                          flexDirection: "row",
+                          gap: 8,
+                          alignItems: "baseline",
+                          paddingLeft: 22,
+                          paddingRight: 12,
+                          paddingVertical: 6,
+                          borderLeftWidth: 2,
+                          borderColor: on ? c.accent : "transparent",
+                          backgroundColor: on ? alpha(c.accent, 0.12) : pressed ? c.surface2 : "transparent",
+                        })}
+                      >
+                        <Text style={[s.muted, { width: 10, color: n.isMap ? c.statusWarning : c.foregroundMuted }]}>
+                          {n.isMap ? "◆" : "·"}
+                        </Text>
+                        <Text numberOfLines={1} style={[s.text, { flex: 1, fontWeight: on || n.isMap ? "700" : "400" }]}>
+                          {n.title}
+                        </Text>
+                        <Text style={s.muted}>{n.sections}§</Text>
+                        <Text style={[s.muted, { minWidth: 34, textAlign: "right" }]}>{formatAge(n.updated, now)}</Text>
+                      </Pressable>
+                    );
+                  })
+                : null}
+            </View>
           );
         })}
       </ScrollView>
@@ -304,7 +338,6 @@ function TopicList({
           </Text>
         </View>
       ) : null}
-      {theme ? null : null}
     </View>
   );
 }
@@ -313,21 +346,22 @@ function EmptyState({ s, vault }: { s: Styles; vault?: string }) {
   const c = s.c;
   return (
     <View style={{ padding: 16, gap: 10 }}>
-      <Text style={[s.text, { fontWeight: "700" }]}>Nothing pinned yet.</Text>
+      <Text style={[s.text, { fontWeight: "700" }]}>No notes yet.</Text>
       <Text style={[s.muted, { lineHeight: 18 }]}>
-        Things you learn in chat land here, one markdown file per topic.
+        The notebook reads a folder of markdown notes, such as an Obsidian vault. Pick the folder in Agent Deck settings.
       </Text>
       <View style={{ gap: 4 }}>
         <Text style={[s.muted, { lineHeight: 18 }]}>
-          <Text style={{ color: c.accent }}>/pin [topic]</Text> in an agent's composer saves its latest reply.
+          <Text style={{ color: c.accent }}>/pin [note]</Text> in an agent's composer saves its latest reply to that note.
         </Text>
         <Text style={[s.muted, { lineHeight: 18 }]}>
-          <Text style={{ color: c.accent }}>pin</Text> on a learning card in chat saves that card.
+          <Text style={{ color: c.accent }}>pin</Text> on a learning card in chat saves the card. Quizzes and flashcards go to
+          the note's Review section, everything else to Reference.
         </Text>
       </View>
       {vault ? (
         <Text selectable style={[s.muted, { lineHeight: 18 }]}>
-          Files go to {vault}. Change the folder in Agent Deck settings. Obsidian can open it as a vault.
+          Looking in {vault}.
         </Text>
       ) : null}
     </View>
@@ -339,59 +373,63 @@ function EmptyState({ s, vault }: { s: Styles; vault?: string }) {
 function Reader({
   s,
   theme,
-  slug,
+  id,
   onBack,
-  onTopic,
-  onSlug,
+  onOpen,
   openMap,
-  openAgent,
 }: {
   s: Styles;
   theme: PluginTheme;
-  slug: string;
+  id: string;
   onBack?: () => void;
-  onTopic(target: string): void;
-  onSlug(slug: string): void;
-  openMap(slug: string): void;
-  openAgent?(agentId: string): void;
+  onOpen(id: string): void;
+  openMap(id: string): void;
 }) {
   const c = s.c;
   const now = useNow();
   const readRpc = useRpc(notebookReadRpc);
   const read = useQuery({
-    queryKey: [KEY, "read", slug],
-    queryFn: () => readRpc({ slug }),
+    queryKey: [KEY, "read", id],
+    queryFn: () => readRpc({ id }),
     refetchOnWindowFocus: true,
     refetchInterval: POLL_MS,
     retry: false,
   });
-  const sections = useMemo(() => splitSections(read.data?.markdown ?? ""), [read.data?.markdown]);
+  const note = read.data?.note;
+  const body = useMemo(
+    () => (read.data ? linkify(stripPreamble(read.data.markdown, read.data.note.title), read.data.links) : ""),
+    [read.data],
+  );
   const onLink = (href: string) => {
-    const target = topicTarget(href);
+    const target = noteHref(href);
     if (target === null) return false;
-    onTopic(target);
+    onOpen(target);
     return true;
   };
-  const topic = read.data?.topic;
+  const scroll = useRef<ScrollView>(null);
+  useEffect(() => {
+    scroll.current?.scrollTo({ y: 0, animated: false });
+  }, [id]);
 
   return (
     <View style={{ flex: 1 }}>
       <View style={s.bar}>
         {onBack ? (
-          <Pressable accessibilityRole="button" accessibilityLabel="Back to topics" onPress={onBack} style={s.button()}>
-            <Text style={s.buttonText()}>‹ topics</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel="Back to notes" onPress={onBack} style={s.button}>
+            <Text style={s.buttonText}>‹ notes</Text>
           </Pressable>
         ) : null}
         <Text numberOfLines={1} style={[s.title, { flex: 1 }]}>
-          {topic?.title ?? slug}
+          {note?.isMap ? <Text style={{ color: c.statusWarning }}>◆ </Text> : null}
+          {note?.title ?? id}
         </Text>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Show in concept map"
-          onPress={() => openMap(topic?.slug ?? slug)}
-          style={s.button()}
+          onPress={() => openMap(note?.id ?? id)}
+          style={s.button}
         >
-          <Text style={s.buttonText()}>map ↗</Text>
+          <Text style={s.buttonText}>map ↗</Text>
         </Pressable>
       </View>
 
@@ -399,64 +437,45 @@ function Reader({
         <ActivityIndicator color={c.accent} style={{ padding: 16 }} />
       ) : read.isError ? (
         <View style={{ padding: 16, gap: 8 }}>
-          <Text style={[s.text, { fontWeight: "700" }]}>No topic "{slug}" yet.</Text>
-          <Text style={[s.muted, { lineHeight: 18 }]}>
-            Links can point at topics that don't exist yet. Pin to it with /pin {slug} to start it.
-          </Text>
-          <Text style={[s.muted, { fontSize: 11 }]}>{errorText(read.error)}</Text>
+          <Text style={[s.text, { fontWeight: "700" }]}>Can't open "{id}".</Text>
+          <Text style={[s.muted, { lineHeight: 18 }]}>{errorText(read.error)}</Text>
         </View>
       ) : (
-        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 18, maxWidth: 820, width: "100%" }}>
-          {topic ? (
-            <Text style={s.muted}>
-              {topic.sections} section{topic.sections === 1 ? "" : "s"} · updated {formatAge(topic.updated, now)} ago
-              {topic.tags.length > 0 ? ` · ${topic.tags.map((g) => `#${g}`).join(" ")}` : ""}
-            </Text>
-          ) : null}
-          {sections.length === 0 ? <Text style={s.muted}>This topic is empty.</Text> : null}
-          {sections.map((section, i) => (
-            <View key={i} style={{ gap: 6 }}>
-              {section.meta ? (
-                <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
-                  <Text style={[s.muted, { fontSize: 11, color: c.accent }]}>▪ {section.meta.kind}</Text>
-                  <Text style={[s.muted, { fontSize: 11 }]}>{formatAge(section.meta.at, now)} ago</Text>
-                  {section.meta.agent ? (
-                    openAgent ? (
-                      <Pressable
-                        accessibilityRole="link"
-                        accessibilityLabel="Open the agent this was pinned from"
-                        onPress={() => openAgent(section.meta!.agent!)}
-                      >
-                        <Text style={[s.muted, { fontSize: 11, textDecorationLine: "underline" }]}>
-                          agent {section.meta.agent.slice(0, 8)}
-                        </Text>
-                      </Pressable>
-                    ) : (
-                      <Text style={[s.muted, { fontSize: 11 }]}>agent {section.meta.agent.slice(0, 8)}</Text>
-                    )
-                  ) : null}
-                  <View style={{ flex: 1, height: 1, backgroundColor: alpha(c.border, 0.7) }} />
+        <ScrollView ref={scroll} style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, maxWidth: 860, width: "100%" }}>
+          {note ? (
+            <View style={{ gap: 6 }}>
+              <Text style={s.muted}>
+                {note.folder ? `${note.folder}/ · ` : ""}
+                {note.sections} section{note.sections === 1 ? "" : "s"} · edited {formatAge(note.updated, now)} ago
+              </Text>
+              {note.tags.length > 0 ? (
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 4 }}>
+                  {note.tags.map((g) => (
+                    <View key={g} style={s.chip(false)}>
+                      <Text style={s.chipText(false)}>#{g}</Text>
+                    </View>
+                  ))}
                 </View>
               ) : null}
-              {section.markdown ? <Markdown text={linkTopics(section.markdown)} theme={theme} onLink={onLink} /> : null}
             </View>
-          ))}
+          ) : null}
+          <NoteBody theme={theme} from={note?.id ?? id} text={body} onLink={onLink} now={now} />
 
-          <View style={{ gap: 6, paddingTop: 10, borderTopWidth: 1, borderColor: c.border }}>
+          <View style={{ gap: 6, marginTop: 8, paddingTop: 10, borderTopWidth: 1, borderColor: c.border }}>
             <Text style={[s.muted, { fontWeight: "700" }]}>linked from</Text>
             {(read.data?.backlinks.length ?? 0) === 0 ? (
-              <Text style={s.muted}>No other topic links here. Write [[{topic?.title ?? slug}]] in a note to link it.</Text>
+              <Text style={s.muted}>No other note links here.</Text>
             ) : (
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
                 {read.data!.backlinks.map((b) => (
                   <Pressable
-                    key={b.slug}
+                    key={b.id}
                     accessibilityRole="link"
                     accessibilityLabel={`Open ${b.title}`}
-                    onPress={() => onSlug(b.slug)}
-                    style={s.button()}
+                    onPress={() => onOpen(b.id)}
+                    style={s.button}
                   >
-                    <Text style={[s.buttonText(), { color: c.accent }]}>← {b.title}</Text>
+                    <Text style={[s.buttonText, { color: c.accent }]}>← {b.title}</Text>
                   </Pressable>
                 ))}
               </View>
@@ -465,5 +484,149 @@ function Reader({
         </ScrollView>
       )}
     </View>
+  );
+}
+
+/** A note's body: markdown runs through Markdown, Obsidian callouts and embeds drawn here. */
+function NoteBody({
+  theme,
+  from,
+  text,
+  onLink,
+  now,
+}: {
+  theme: PluginTheme;
+  from: string;
+  text: string;
+  onLink(href: string): boolean;
+  now: number;
+}) {
+  const parts = useMemo(() => segments(text), [text]);
+  return (
+    <View style={{ gap: 12 }}>
+      {parts.map((part, i) => (
+        <SegmentView key={i} part={part} theme={theme} from={from} onLink={onLink} now={now} />
+      ))}
+    </View>
+  );
+}
+
+function SegmentView({
+  part,
+  theme,
+  from,
+  onLink,
+  now,
+}: {
+  part: Segment;
+  theme: PluginTheme;
+  from: string;
+  onLink(href: string): boolean;
+  now: number;
+}) {
+  const c = theme.colors;
+  switch (part.type) {
+    case "markdown":
+      return <Markdown text={part.text} theme={theme} onLink={onLink} />;
+    case "pinned":
+      return (
+        <Text style={{ color: c.foregroundMuted, fontFamily: MONO, fontSize: 11 }}>
+          ▪ pinned from paseo · {formatAge(part.at, now)} ago
+        </Text>
+      );
+    case "embed":
+      return <Embed theme={theme} from={from} target={part.target} />;
+    case "callout":
+      return <Callout theme={theme} part={part} from={from} onLink={onLink} now={now} />;
+  }
+}
+
+function calloutStyle(kind: string, c: PluginTheme["colors"]): { color: string; glyph: string } {
+  if (["question", "help", "faq"].includes(kind)) return { color: c.statusWarning, glyph: "?" };
+  if (["tip", "hint", "important", "success", "check", "done"].includes(kind)) return { color: c.statusSuccess, glyph: "✓" };
+  if (["warning", "caution", "attention"].includes(kind)) return { color: c.statusWarning, glyph: "!" };
+  if (["danger", "error", "failure", "fail", "missing", "bug"].includes(kind)) return { color: c.statusDanger, glyph: "×" };
+  if (["quote", "cite", "example"].includes(kind)) return { color: c.foregroundMuted, glyph: kind === "example" ? "»" : "❝" };
+  return { color: c.accent, glyph: "i" };
+}
+
+/** `> [!type]- title`: collapsed with `-`, open with `+` or no marker; only foldable ones toggle. */
+function Callout({
+  theme,
+  part,
+  from,
+  onLink,
+  now,
+}: {
+  theme: PluginTheme;
+  part: Extract<Segment, { type: "callout" }>;
+  from: string;
+  onLink(href: string): boolean;
+  now: number;
+}) {
+  const c = theme.colors;
+  const foldable = part.fold !== "";
+  const [open, setOpen] = useState(part.fold !== "-");
+  const { color, glyph } = calloutStyle(part.kind, c);
+  const title = part.title || part.kind.charAt(0).toUpperCase() + part.kind.slice(1);
+  const header = (
+    <View style={{ flexDirection: "row", gap: 8, alignItems: "flex-start" }}>
+      <Text style={{ color, fontFamily: MONO, fontSize: 12, fontWeight: "800", width: 12 }}>{glyph}</Text>
+      <View style={{ flex: 1 }}>
+        <Markdown text={title} theme={theme} size={13} onLink={onLink} />
+      </View>
+      {foldable ? <Text style={{ color, fontFamily: MONO, fontSize: 12 }}>{open ? "▾" : "▸"}</Text> : null}
+    </View>
+  );
+  return (
+    <View style={{ borderLeftWidth: 2, borderColor: color, backgroundColor: alpha(color, 0.08), paddingHorizontal: 12, paddingVertical: 8, gap: 8 }}>
+      {foldable ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded: open }}
+          accessibilityLabel={`${open ? "Hide" : "Show"} ${part.title || part.kind}`}
+          onPress={() => setOpen((v) => !v)}
+        >
+          {header}
+        </Pressable>
+      ) : (
+        header
+      )}
+      {open && part.body.trim() ? (
+        <View style={{ paddingLeft: 20 }}>
+          <NoteBody theme={theme} from={from} text={part.body} onLink={onLink} now={now} />
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+/** `![[figure.png]]` through the asset RPC. */
+function Embed({ theme, from, target }: { theme: PluginTheme; from: string; target: string }) {
+  const c = theme.colors;
+  const file = target.split("|")[0]!.trim();
+  const assetRpc = useRpc(notebookAssetRpc);
+  const asset = useQuery({
+    queryKey: [KEY, "asset", from, file],
+    queryFn: () => assetRpc({ from, target: file }),
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+  const [ratio, setRatio] = useState(4 / 3);
+  if (asset.isPending) return <ActivityIndicator color={c.accent} style={{ alignSelf: "flex-start" }} />;
+  if (!asset.data) {
+    return <Text style={{ color: c.foregroundMuted, fontFamily: MONO, fontSize: 12 }}>[image not found: {file}]</Text>;
+  }
+  return (
+    <Image
+      accessibilityLabel={file}
+      source={{ uri: `data:${asset.data.mime};base64,${asset.data.base64}` }}
+      onLoad={(e) => {
+        const { width, height } = e.nativeEvent.source;
+        if (width > 0 && height > 0) setRatio(width / height);
+      }}
+      resizeMode="contain"
+      style={{ width: "100%", maxWidth: 760, aspectRatio: ratio, borderWidth: 1, borderColor: c.border, backgroundColor: c.surface1 }}
+    />
   );
 }
