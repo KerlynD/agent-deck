@@ -22,6 +22,13 @@ A Paseo plugin that rices Paseo into a vim/btop-style workspace and adds the too
 - New agents are taught the formats through their system prompt. Both parts can be switched off in settings.
 - The grammar, with examples you can paste into a `CLAUDE.md`, is in [docs/learning-blocks.md](docs/learning-blocks.md).
 
+**Notebook**
+- Reads a folder of markdown notes, such as an Obsidian vault, set in Agent Deck settings (default `~/Documents/Paseo Notebook`). Open it from the sidebar, from `⌘K` ("Open notebook"), or as a workspace panel beside your agents.
+- Notes are grouped by folder, with filtering by name and tag. Map notes (titles ending in "— Map") are marked with ◆.
+- The reader draws Obsidian callouts (`> [!question]-` ones start collapsed, so review answers stay hidden), `[[links]]` you can follow, image embeds such as `![[figure.png]]`, and backlinks.
+- `/pin [note]` in an agent's composer saves the agent's latest reply to that note's `## Reference` section. Pinning a learning card does the same, with quizzes and flashcards going to `## Review` as collapsible question callouts.
+- Pins only add to the end of `Review` or `Reference` and never touch `In My Own Words`. When no note matches, the pin creates one in `Paseo Inbox/`.
+
 **Command-line composer** (desktop and web)
 - A `❯` prompt, an INSERT/NORMAL statusline that follows focus, and key hints.
 - A `ctx 64%` pill on every agent's composer, with a token and cost breakdown.
