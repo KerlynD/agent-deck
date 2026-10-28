@@ -35,10 +35,10 @@ type ToolData = z.output<typeof toolSchema>;
 
 /* ------------------------------------------------------------ assistant */
 
-function AssistantRow({ item, theme }: PluginTimelineItemProps<z.output<typeof assistantSchema>>) {
+function AssistantRow({ item, theme, agentId }: PluginTimelineItemProps<z.output<typeof assistantSchema>>) {
   return (
     <View style={{ paddingVertical: 4 }}>
-      <Markdown text={item.data.text} theme={theme} streaming={item.data.phase === "streaming"} />
+      <Markdown text={item.data.text} theme={theme} streaming={item.data.phase === "streaming"} agentId={agentId} />
     </View>
   );
 }

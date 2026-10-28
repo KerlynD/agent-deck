@@ -5,6 +5,7 @@ import { type ReactNode, memo, useMemo } from "react";
 import { ScrollView, Text, type TextStyle, View } from "react-native";
 import { CodeView } from "./code-view";
 import { DIAGRAM_LANGS, DiagramView } from "./diagram";
+import { LEARNING_LANGS, LearningBlock } from "./learning/blocks";
 import { alpha, MONO } from "./ui-kit";
 
 interface Ctx {
@@ -13,6 +14,8 @@ interface Ctx {
   streaming: boolean;
   size: number;
   dim?: boolean;
+  /** Agent whose reply this is; learning blocks pin with it. */
+  agentId?: string;
 }
 
 const LEX_OPTIONS = { gfm: true, breaks: false };
@@ -149,6 +152,20 @@ function block(tok: Token, ctx: Ctx, key: string, isLast: boolean): ReactNode {
       const code = tok as Tokens.Code;
       const lang = (code.lang ?? "").trim().split(/\s+/)[0] ?? "";
       const unfinished = ctx.streaming && isLast;
+      if (LEARNING_LANGS.has(lang.toLowerCase())) {
+        return (
+          <View key={key} style={{ marginVertical: 2 }}>
+            <LearningBlock
+              theme={ctx.theme}
+              lang={lang.toLowerCase()}
+              code={code.text}
+              streaming={unfinished}
+              agentId={ctx.agentId}
+              fallback={<CodeView theme={ctx.theme} code={code.text} label={lang} startLine={false} plain />}
+            />
+          </View>
+        );
+      }
       if (DIAGRAM_LANGS.has(lang.toLowerCase())) {
         return (
           <View key={key} style={{ marginVertical: 2 }}>
@@ -303,14 +320,16 @@ export const Markdown = memo(function Markdown({
   streaming = false,
   size = 14,
   dim = false,
+  agentId,
 }: {
   text: string;
   theme: PluginTheme;
   streaming?: boolean;
   size?: number;
   dim?: boolean;
+  agentId?: string;
 }) {
   const tokens = useMemo(() => lex(text), [text]);
-  const ctx: Ctx = { theme, streaming, size, dim };
+  const ctx: Ctx = { theme, streaming, size, dim, agentId };
   return <View style={{ gap: 10 }}>{blocks(tokens, ctx, "md")}</View>;
 });

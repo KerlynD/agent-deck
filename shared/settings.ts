@@ -16,6 +16,13 @@ export const deckSettings = defineSettings({
     diagramStyle: z.enum(["svg", "ascii"]).default("svg"),
     /** "auto" follows an Agent Deck palette when one is active. */
     syntaxTheme: z.string().default("auto"),
+    // Learning
+    /** Draw ```callout, ```quiz, ```flashcards, ```steps and ```compare blocks as cards. */
+    chatLearning: z.boolean().default(true),
+    /** Teach new agents the learning block formats through their system prompt. */
+    learningPrompt: z.boolean().default(true),
+    /** Notebook vault folder. Empty: ~/Documents/Paseo Notebook. */
+    notebookPath: z.string().default(""),
     // Rice (desktop and web only)
     riceSquare: z.boolean().default(true),
     riceMono: z.boolean().default(true),

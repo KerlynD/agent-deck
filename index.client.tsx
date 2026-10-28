@@ -1,5 +1,8 @@
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { AgentsPanel } from "./client/agents-panel";
+import { installConceptMap } from "./client/concept-map";
+import { installLearning } from "./client/learning";
+import { installNotebook } from "./client/notebook";
 import { createChat } from "./client/chat";
 import { bindChat, unbindChat } from "./client/controller";
 import { InboxScreen, InboxSidebarItem } from "./client/inbox";
@@ -71,7 +74,14 @@ export default function contribute(client: PluginClientContext) {
     },
   });
 
+  const removeLearning = installLearning(client);
+  const removeNotebook = installNotebook(client);
+  const removeConceptMap = installConceptMap(client);
+
   return () => {
+    removeConceptMap();
+    removeNotebook();
+    removeLearning();
     unbindChat();
     chat.dispose();
     removePills();

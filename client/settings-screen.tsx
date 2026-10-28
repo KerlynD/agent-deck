@@ -1,6 +1,6 @@
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useSettings } from "@getpaseo/plugin/client";
-import { SettingsCard, SettingsSection, SettingsSelect, SettingsSwitch } from "@getpaseo/plugin/client/ui";
+import { SettingsCard, SettingsInput, SettingsSection, SettingsSelect, SettingsSwitch } from "@getpaseo/plugin/client/ui";
 import { Text } from "react-native";
 import { SHIKI_THEMES } from "../shared/palettes";
 import { type DeckSettings, deckSettings } from "../shared/settings";
@@ -58,6 +58,20 @@ export function DeckSettingsScreen({ theme }: PluginSurfaceProps) {
             value={values.syntaxTheme}
             options={[{ label: "Auto", value: "auto" }, ...SHIKI_THEMES.map((t) => ({ label: t, value: t }))]}
             onValueChange={(v) => set({ syntaxTheme: v })}
+          />
+        </SettingsCard>
+      </SettingsSection>
+      <SettingsSection title="Learning">
+        <SettingsCard>
+          {toggle("chatLearning", "Learning blocks", "Callouts, quizzes, flashcards, steps and comparisons render as cards")}
+          {toggle("learningPrompt", "Teach agents the formats", "Adds the learning block formats to new agents' system prompt")}
+          <SettingsInput
+            label="Notebook folder"
+            hint="Where pinned notes are saved as markdown. Empty uses ~/Documents/Paseo Notebook"
+            initialValue={values.notebookPath}
+            placeholder="~/Documents/Paseo Notebook"
+            disabled={settings.saving}
+            onChangeText={(v) => set({ notebookPath: v })}
           />
         </SettingsCard>
       </SettingsSection>
