@@ -53,6 +53,13 @@ A Paseo plugin that rices Paseo into a vim/btop-style workspace and adds the too
 - A sidebar row showing your most-used plan window.
 - Its popover has bars for every provider window, with reset times.
 
+**Concept map**
+- A graph of the notes in your notebook vault and the `[[wikilinks]]` between them. Open it from the Command Center ("Open concept map") or as a workspace panel.
+- Notes are colored and clustered by top-level folder, with a legend. Map notes (titles ending in "— Map") are drawn as larger hubs. Links to notes that do not exist yet show as dashed outlines.
+- Tap a note to highlight its links and see its folder, tags, section count and linked notes, then open it in the notebook.
+- Zoom, fit, search and refresh controls. The layout is computed on the device, so it works the same on desktop, web and mobile.
+- On narrow screens it opens as a list of notes grouped by folder, with the graph one tap away.
+
 ## Requirements
 
 - Paseo 0.12.0 or later.
