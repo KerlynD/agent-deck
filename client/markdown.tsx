@@ -16,6 +16,8 @@ interface Ctx {
   dim?: boolean;
   /** Agent whose reply this is; learning blocks pin with it. */
   agentId?: string;
+  /** Link handler; true means handled, otherwise the link opens externally. */
+  onLink?: (href: string) => boolean;
 }
 
 const LEX_OPTIONS = { gfm: true, breaks: false };
@@ -74,7 +76,9 @@ function inline(tokens: Token[] | undefined, ctx: Ctx, keyBase: string): ReactNo
           <Text
             key={key}
             accessibilityRole="link"
-            onPress={() => void openExternalUrl(link.href)}
+            onPress={() => {
+              if (!ctx.onLink?.(link.href)) void openExternalUrl(link.href);
+            }}
             style={{ color: c.accent, textDecorationLine: "underline" }}
           >
             {inline(link.tokens, ctx, key)}
@@ -321,6 +325,7 @@ export const Markdown = memo(function Markdown({
   size = 14,
   dim = false,
   agentId,
+  onLink,
 }: {
   text: string;
   theme: PluginTheme;
@@ -328,8 +333,9 @@ export const Markdown = memo(function Markdown({
   size?: number;
   dim?: boolean;
   agentId?: string;
+  onLink?: (href: string) => boolean;
 }) {
   const tokens = useMemo(() => lex(text), [text]);
-  const ctx: Ctx = { theme, streaming, size, dim, agentId };
+  const ctx: Ctx = { theme, streaming, size, dim, agentId, onLink };
   return <View style={{ gap: 10 }}>{blocks(tokens, ctx, "md")}</View>;
 });
