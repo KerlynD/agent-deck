@@ -1,33 +1,39 @@
 import type { RpcInput } from "@getpaseo/plugin";
 import type { PluginHandlerContext, PluginServerContext, PluginSettings } from "@getpaseo/plugin/server";
 import { randomBytes } from "node:crypto";
-import { readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, extname, join, posix, resolve, sep } from "node:path";
 import {
+  notebookAssetRpc,
   notebookListRpc,
   notebookPinRpc,
   notebookReadRpc,
-  type TopicSummary,
+  type NoteSummary,
 } from "../shared/notebook";
 import type { deckSettings } from "../shared/settings";
+import { sectionFor, toObsidian } from "./obsidian";
 import {
-  countSections,
-  ensureVault,
-  type Frontmatter,
-  formatFrontmatter,
+  appendToSection,
+  ensureDir,
+  fileNameFor,
+  isAssetTarget,
+  isMapTitle,
+  LinkResolver,
   listNotes,
-  noteTitle,
-  parseNote,
+  noteLinks,
+  PIN_FOLDER,
   readNote,
-  slugify,
+  readNoteAt,
+  safeJoin,
+  sectionHeadings,
   type VaultNote,
   vaultDir,
-  wikiLinks,
 } from "./vault";
 
 type Settings = PluginSettings<typeof deckSettings.schema>;
 
 export function registerNotebook(server: PluginServerContext, settings: Settings): () => void {
+  // Read per request so a changed vault path applies without a reload.
   const dir = async () => {
     const state = await settings.read();
     return vaultDir(state.status === "ready" ? state.values.notebookPath : "");
@@ -35,34 +41,20 @@ export function registerNotebook(server: PluginServerContext, settings: Settings
   server.handle(notebookPinRpc, async (input, ctx) => pin(await dir(), input, ctx));
   server.handle(notebookListRpc, async () => {
     const vault = await dir();
-    return { vault, topics: await listTopics(vault) };
+    return { vault, notes: await listSummaries(vault) };
   });
-  server.handle(notebookReadRpc, async ({ slug }) => readTopic(await dir(), slug));
+  server.handle(notebookReadRpc, async ({ id }) => readById(await dir(), id));
+  server.handle(notebookAssetRpc, async ({ from, target }) => readAsset(await dir(), from, target));
   return () => {};
 }
 
-// ── Path safety ──────────────────────────────────────────────────────────────
-
-/**
- * The note file for `slug`, or null when the slug could escape the vault. Slugs
- * the notebook writes are slugified; files made elsewhere (Obsidian) keep their
- * own names, so any plain file name is allowed, never a path.
- */
-export function notePath(dir: string, slug: string): string | null {
-  if (!slug || slug.length > 200 || slug.startsWith(".") || /[/\\\0]/.test(slug)) return null;
-  const root = resolve(dir);
-  const path = resolve(root, `${slug}.md`);
-  return dirname(path) === root ? path : null;
-}
-
-// ── Write queue ──────────────────────────────────────────────────────────────
+// ── Writes ───────────────────────────────────────────────────────────────────
 
 const queues = new Map<string, Promise<unknown>>();
 
 /** Runs `task` after every earlier task on the same file has settled. */
 function serialize<T>(key: string, task: () => Promise<T>): Promise<T> {
-  const previous = queues.get(key) ?? Promise.resolve();
-  const next = previous.then(task, task);
+  const next = (queues.get(key) ?? Promise.resolve()).then(task, task);
   const tail = next.catch(() => undefined);
   queues.set(key, tail);
   void tail.then(() => {
@@ -72,8 +64,8 @@ function serialize<T>(key: string, task: () => Promise<T>): Promise<T> {
 }
 
 async function writeAtomic(path: string, text: string): Promise<void> {
-  // Dot-prefixed so a half-written file never shows up in the topic list.
-  const tmp = join(dirname(path), `.${randomBytes(6).toString("hex")}.tmp`);
+  // Dot-prefixed, so a half-written file never shows up as a note.
+  const tmp = join(dirname(path), `.${basename(path)}.${randomBytes(4).toString("hex")}.tmp`);
   try {
     await writeFile(tmp, text, "utf8");
     await rename(tmp, path);
@@ -83,147 +75,197 @@ async function writeAtomic(path: string, text: string): Promise<void> {
   }
 }
 
+async function readIfExists(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 // ── Pin ──────────────────────────────────────────────────────────────────────
 
 const FENCE = /^\s{0,3}(```|~~~)/;
 
-/** Shifts headings so the shallowest is `###`: a pinned body must not open new `##` sections. */
-export function demoteHeadings(markdown: string): string {
+/** Shifts headings so the shallowest is `min`: a pinned reply must not open new `##` sections. */
+export function demoteHeadings(markdown: string, min = 4): string {
   const lines = markdown.split(/\r?\n/);
   let fence: string | null = null;
-  let min = 7;
-  const isHeading = lines.map((line) => {
+  let shallowest = 7;
+  const depths = lines.map((line) => {
     const f = FENCE.exec(line);
     if (f) {
       if (fence === null) fence = f[1]!;
       else if (f[1] === fence) fence = null;
-      return false;
+      return 0;
     }
-    if (fence !== null) return false;
-    const h = /^(#{1,6})\s/.exec(line);
-    if (h) min = Math.min(min, h[1]!.length);
-    return Boolean(h);
+    if (fence !== null) return 0;
+    const depth = /^(#{1,6})\s/.exec(line)?.[1]!.length ?? 0;
+    if (depth) shallowest = Math.min(shallowest, depth);
+    return depth;
   });
-  const shift = min < 3 ? 3 - min : 0;
-  if (shift === 0) return lines.join("\n");
+  const shift = Math.max(0, min - shallowest);
+  if (!shift) return lines.join("\n");
   return lines
-    .map((line, i) => {
-      if (!isHeading[i]) return line;
-      const depth = /^#+/.exec(line)![0].length;
-      return "#".repeat(Math.min(6, depth + shift)) + line.slice(depth);
-    })
+    .map((line, i) => (depths[i] ? "#".repeat(Math.min(6, depths[i]! + shift)) + line.slice(depths[i]) : line))
     .join("\n");
 }
 
-function oneLine(s: string, max: number): string {
-  return s.replace(/\s+/g, " ").trim().slice(0, max);
+function tagify(tag: string): string {
+  return tag.trim().replace(/^#/, "").replace(/\s+/g, "-").replace(/[^\p{L}\p{N}_/-]/gu, "");
 }
 
-function mergeTags(a: string[], b: string[] | undefined): string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const raw of [...a, ...(b ?? [])]) {
-    const tag = oneLine(raw, 60).replace(/^#/, "");
-    const key = tag.toLowerCase();
-    if (!tag || seen.has(key)) continue;
-    seen.add(key);
-    out.push(tag);
-  }
-  return out;
-}
-
-async function agentTitle(paseo: PluginHandlerContext["paseo"], agentId: string | undefined): Promise<string | null> {
-  if (!agentId) return null;
+async function agentTitle(ctx: PluginHandlerContext | null, agentId: string | undefined): Promise<string | null> {
+  if (!ctx || !agentId) return null;
   try {
-    const result = await paseo.agents.ref(agentId).refresh();
-    return oneLine(result?.agent.title ?? "", 200) || null;
+    const result = await ctx.paseo.agents.ref(agentId).refresh();
+    return result?.agent.title?.replace(/\s+/g, " ").trim() || null;
   } catch {
     return null;
   }
 }
 
-export async function pin(
-  dir: string,
-  input: RpcInput<typeof notebookPinRpc>,
-  ctx: PluginHandlerContext | null,
-): Promise<{ slug: string; title: string; path: string }> {
-  const topic =
-    oneLine(input.topic ?? "", 200) || (ctx ? await agentTitle(ctx.paseo, input.agentId) : null) || "Inbox";
-  const slug = slugify(topic);
-  await ensureVault(dir);
-  const path = notePath(dir, slug);
-  if (!path) throw new Error(`Invalid topic: ${topic}`);
+/**
+ * Appends a block to the note `topic` resolves to, in `## Review` or `## Reference`.
+ * No match: a new note in PIN_FOLDER. Only those two sections are ever written.
+ */
+export async function pin(vault: string, input: RpcInput<typeof notebookPinRpc>, ctx: PluginHandlerContext | null) {
+  const topic = input.topic?.replace(/^\[\[|\]\]$/g, "").split("|")[0]!.trim() || null;
+  const name = topic || (await agentTitle(ctx, input.agentId)) || "Pinned from Paseo";
+  const section = sectionFor(input.kind);
+  const body = input.kind === "note" ? demoteHeadings(input.body) : input.body;
+
+  const target = new LinkResolver(await listNotes(vault)).resolve(name);
+  const path = target?.path ?? safeJoin(vault, `${PIN_FOLDER}/${fileNameFor(name)}.md`);
+  if (!path) throw new Error(`Can't pin to "${name}"`);
 
   return serialize(path, async () => {
-    const now = new Date().toISOString();
-    let existing: string | null = null;
-    try {
-      existing = await readFile(path, "utf8");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    const chunk = toObsidian(input.kind, input.title, body, new Date().toISOString());
+    let text = await readIfExists(path);
+    const created = text === null;
+    if (text === null) {
+      await ensureDir(dirname(path));
+      const tags = [...new Set(["paseo", ...(input.tags ?? [])].map(tagify).filter(Boolean))];
+      text = `${tags.map((t) => `#${t}`).join(" ")}\n\n# ${basename(path, ".md")}\n`;
     }
-    const parsed = existing === null ? null : parseNote(existing);
-    const meta: Frontmatter = {
-      title: parsed?.meta.title || topic,
-      created: parsed?.meta.created || now,
-      updated: now,
-      tags: mergeTags(parsed?.meta.tags ?? [], input.tags),
-    };
-    const agent = input.agentId ? ` agent=${input.agentId.replace(/\s|-->/g, "").slice(0, 120)}` : "";
-    const section = [
-      `## ${oneLine(input.title, 300) || "Note"}`,
-      `<!-- pinned ${now} kind=${input.kind}${agent} -->`,
-      demoteHeadings(input.body.trim()),
-    ].join("\n");
-    const previous = (parsed?.body ?? "").replace(/^(\s*\n)+/, "").replace(/\s+$/, "");
-    const body = previous ? `${previous}\n\n${section}\n` : `${section}\n`;
-    await writeAtomic(path, `${formatFrontmatter(meta)}\n${body}`);
-    return { slug, title: meta.title!, path };
+    await writeAtomic(path, appendToSection(text, section, chunk));
+    const note = await readNoteAt(vault, path);
+    if (!note) throw new Error("The note was written but can't be read back");
+    return { id: note.id, title: note.title, path, section, created };
   });
 }
 
 // ── List and read ────────────────────────────────────────────────────────────
 
-function summary(note: VaultNote): TopicSummary {
+function summary(note: VaultNote): NoteSummary {
   return {
-    slug: note.slug,
-    title: noteTitle(note),
-    tags: note.meta.tags,
-    sections: countSections(note.body),
-    updated: note.meta.updated || note.mtime.toISOString(),
+    id: note.id,
+    title: note.title,
+    folder: note.folder,
+    tags: note.tags,
+    isMap: isMapTitle(note.title),
+    sections: sectionHeadings(note.text).length,
+    updated: note.mtime.toISOString(),
   };
 }
 
-function time(iso: string): number {
-  const t = Date.parse(iso);
-  return Number.isNaN(t) ? 0 : t;
+export async function listSummaries(vault: string): Promise<NoteSummary[]> {
+  const notes = await listNotes(vault);
+  return notes.map(summary).sort((a, b) => Date.parse(b.updated) - Date.parse(a.updated));
 }
 
-export async function listTopics(dir: string): Promise<TopicSummary[]> {
-  const notes = await listNotes(dir);
-  return notes.map(summary).sort((a, b) => time(b.updated) - time(a.updated));
-}
+export async function readById(vault: string, id: string) {
+  const notes = await listNotes(vault);
+  const resolver = new LinkResolver(notes);
+  // An id, or a link target or title (deep links, the concept map's ghosts).
+  const note = (await readNote(vault, id)) ?? resolver.resolve(id);
+  if (!note) throw new Error(`No note "${id}" in the vault`);
 
-/** Keys a `[[link]]` may resolve to for this note: its file name and its title, slugified. */
-function keys(note: VaultNote): Set<string> {
-  return new Set([slugify(note.slug), slugify(noteTitle(note))]);
-}
-
-export async function readTopic(dir: string, slug: string) {
-  const all = await listNotes(dir);
-  let note: VaultNote | null = null;
-  if (notePath(dir, slug)) note = await readNote(dir, slug);
-  if (!note) {
-    // A link target or a file made outside the notebook: match by slug or title.
-    const want = slugify(slug);
-    note = all.find((n) => keys(n).has(want)) ?? null;
+  const links: Record<string, string | null> = {};
+  for (const target of noteLinks(note.text)) {
+    if (!(target in links)) links[target] = resolver.resolve(target, note)?.id ?? null;
   }
-  if (!note) throw new Error(`No topic "${slug}" in the notebook yet`);
-  const found = note;
-  const mine = keys(found);
-  const backlinks = all
-    .filter((n) => n.slug !== found.slug && wikiLinks(n.body).some((target) => mine.has(slugify(target))))
-    .map((n) => ({ slug: n.slug, title: noteTitle(n) }))
+  const backlinks = notes
+    .filter((n) => n.id !== note.id && noteLinks(n.text).some((t) => resolver.resolve(t, n)?.id === note.id))
+    .map((n) => ({ id: n.id, title: n.title }))
     .sort((a, b) => a.title.localeCompare(b.title));
-  return { topic: summary(found), markdown: found.body, backlinks };
+  return { note: summary(note), markdown: note.text, backlinks, links };
+}
+
+// ── Assets ───────────────────────────────────────────────────────────────────
+
+const IMAGE_MIME: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".bmp": "image/bmp",
+};
+const MAX_ASSET_BYTES = 3 * 1024 * 1024;
+const INDEX_TTL_MS = 30_000;
+
+/** Lowercased file name → absolute paths, for embeds that name only a file. */
+let assetIndex: { vault: string; at: number; files: Map<string, string[]> } | null = null;
+
+async function indexAssets(vault: string): Promise<Map<string, string[]>> {
+  if (assetIndex && assetIndex.vault === vault && Date.now() - assetIndex.at < INDEX_TTL_MS) return assetIndex.files;
+  const files = new Map<string, string[]>();
+  const walk = async (dir: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    await Promise.all(
+      entries.map(async (entry) => {
+        if (entry.name.startsWith(".")) return;
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) return walk(full);
+        if (entry.isFile() && IMAGE_MIME[extname(entry.name).toLowerCase()]) {
+          const key = entry.name.toLowerCase();
+          files.set(key, [...(files.get(key) ?? []), full]);
+        }
+      }),
+    );
+  };
+  await walk(resolve(vault));
+  assetIndex = { vault, at: Date.now(), files };
+  return files;
+}
+
+async function loadImage(path: string): Promise<{ mime: string; base64: string } | null> {
+  const mime = IMAGE_MIME[extname(path).toLowerCase()];
+  if (!mime) return null;
+  try {
+    const info = await stat(path);
+    if (!info.isFile() || info.size > MAX_ASSET_BYTES) return null;
+    return { mime, base64: (await readFile(path)).toString("base64") };
+  } catch {
+    return null;
+  }
+}
+
+/** An `![[embed]]` beside the note, then by vault path, then by file name anywhere in the vault. */
+export async function readAsset(vault: string, from: string, target: string) {
+  const clean = target.split("|")[0]!.split("#")[0]!.trim().replace(/\\/g, "/");
+  if (!isAssetTarget(clean) || !IMAGE_MIME[extname(clean).toLowerCase()]) return null;
+  const folder = posix.dirname(from.replace(/\\/g, "/"));
+  const near = folder === "." ? "" : folder;
+  for (const path of [safeJoin(vault, posix.join(near, clean)), safeJoin(vault, clean)]) {
+    if (!path) continue;
+    const image = await loadImage(path);
+    if (image) return image;
+  }
+  const matches = (await indexAssets(vault)).get(basename(clean).toLowerCase()) ?? [];
+  // Prefer the copy under the note's folder, like Obsidian.
+  const root = (safeJoin(vault, near) ?? resolve(vault)) + sep;
+  const sorted = [...matches].sort((a, b) => Number(b.startsWith(root)) - Number(a.startsWith(root)));
+  for (const path of sorted) {
+    const image = await loadImage(path);
+    if (image) return image;
+  }
+  return null;
 }

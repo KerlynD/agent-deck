@@ -16,6 +16,12 @@ A Paseo plugin that rices Paseo into a vim/btop-style workspace and adds the too
 - Reasoning collapses to a one-line "thought" preview.
 - Task lists show as a checklist with a progress bar.
 
+**Learning blocks**
+- ` ```callout `, ` ```quiz `, ` ```flashcards `, ` ```steps ` and ` ```compare ` blocks render as interactive cards: answerable quizzes with a score, flip cards, step-by-step reveals and side-by-side comparisons.
+- Every card has a `src` toggle and a pin button that saves the block to the notebook.
+- New agents are taught the formats through their system prompt. Both parts can be switched off in settings.
+- The grammar, with examples you can paste into a `CLAUDE.md`, is in [docs/learning-blocks.md](docs/learning-blocks.md).
+
 **Command-line composer** (desktop and web)
 - A `❯` prompt, an INSERT/NORMAL statusline that follows focus, and key hints.
 - A `ctx 64%` pill on every agent's composer, with a token and cost breakdown.

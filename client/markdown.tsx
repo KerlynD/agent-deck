@@ -162,10 +162,14 @@ function block(tok: Token, ctx: Ctx, key: string, isLast: boolean): ReactNode {
             <LearningBlock
               theme={ctx.theme}
               lang={lang.toLowerCase()}
+              info={code.lang ?? lang}
               code={code.text}
               streaming={unfinished}
               agentId={ctx.agentId}
               fallback={<CodeView theme={ctx.theme} code={code.text} label={lang} startLine={false} plain />}
+              renderMarkdown={(text, opts) => (
+                <Markdown text={text} theme={ctx.theme} size={ctx.size - 1} dim={opts?.dim} agentId={ctx.agentId} />
+              )}
             />
           </View>
         );
