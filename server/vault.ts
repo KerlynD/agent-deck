@@ -17,17 +17,7 @@ export async function ensureVault(dir: string): Promise<string> {
   return dir;
 }
 
-/** `Event Loop` and `event-loop` share the slug `event-loop`. */
-export function slugify(title: string): string {
-  const slug = title
-    .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80);
-  return slug || "untitled";
-}
+export { slugify } from "../shared/notebook";
 
 export interface Frontmatter {
   title?: string;
@@ -95,9 +85,20 @@ export function wikiLinks(markdown: string): string[] {
   return out;
 }
 
-/** Number of `## ` sections. */
+/** Number of `## ` sections, ignoring `## ` lines inside code fences. */
 export function countSections(body: string): number {
-  return body.split(/\r?\n/).filter((l) => l.startsWith("## ")).length;
+  let fence: string | null = null;
+  let count = 0;
+  for (const line of body.split(/\r?\n/)) {
+    const f = /^\s{0,3}(```|~~~)/.exec(line);
+    if (f) {
+      if (fence === null) fence = f[1]!;
+      else if (f[1] === fence) fence = null;
+    } else if (fence === null && line.startsWith("## ")) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 export async function readNote(dir: string, slug: string): Promise<VaultNote | null> {

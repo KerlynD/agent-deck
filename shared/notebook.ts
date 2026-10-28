@@ -88,3 +88,15 @@ export const notebookGraphRpc = defineRpc({
     edges: z.array(z.object({ from: z.string(), to: z.string(), weight: z.number().int() })),
   }),
 });
+
+/** `Event Loop` and `event-loop` share the slug `event-loop`. Shared so clients resolve `[[links]]` the same way. */
+export function slugify(title: string): string {
+  const slug = title
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return slug || "untitled";
+}
