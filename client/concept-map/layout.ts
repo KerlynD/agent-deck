@@ -2,15 +2,18 @@
  * Deterministic force-directed layout for the concept map.
  *
  * Pure TypeScript (no React Native) so it runs anywhere and can be tested alone.
- * Fruchterman-Reingold with a seeded PRNG, a little gravity so islands stay close,
- * then a horizontal stretch and an overlap pass because labels are wide pills.
+ * Fruchterman-Reingold with a seeded PRNG, a little gravity so islands stay close and a
+ * pull toward each folder's centroid so folder-mates cluster, then a horizontal stretch
+ * and an overlap pass because labels are wide pills.
  * Positions are in world units; the view multiplies them by its zoom.
  */
 
 export interface GraphNodeInput {
-  slug: string;
+  id: string;
   title: string;
+  folder: string;
   exists: boolean;
+  isMap: boolean;
   sections: number;
   tags: string[];
 }
@@ -56,15 +59,20 @@ export function labelOf(title: string): string {
   return title.length > MAX_LABEL ? `${title.slice(0, MAX_LABEL - 1)}…` : title;
 }
 
-/** Pill metrics from section count. Mono glyphs are ~0.6em wide. */
-export function pillSize(title: string, sections: number): { w: number; h: number; font: number; label: string } {
-  const font = 11 + Math.min(sections, 8) * 0.75;
+/** Top-level folder, the unit for colors and the legend. "" for the vault root and ghosts. */
+export function topFolder(folder: string): string {
+  return folder.split("/")[0] ?? "";
+}
+
+/** Pill metrics from section count; map notes are hubs. Mono glyphs are ~0.6em wide. */
+export function pillSize(title: string, sections: number, isMap: boolean): { w: number; h: number; font: number; label: string } {
+  const font = 11 + Math.min(sections, 8) * 0.4 + (isMap ? 4 : 0);
   const label = labelOf(title);
   return { w: Math.ceil(label.length * font * CHAR + 18), h: Math.ceil(font * 1.35 + 10), font, label };
 }
 
 export function graphSignature(nodes: GraphNodeInput[], edges: GraphEdgeInput[]): string {
-  const n = nodes.map((x) => `${x.slug}|${x.title}|${x.sections}|${x.exists ? 1 : 0}`).join("\n");
+  const n = nodes.map((x) => `${x.id}|${x.folder}|${x.sections}|${x.exists ? 1 : 0}${x.isMap ? 1 : 0}`).join("\n");
   const e = edges.map((x) => `${x.from}>${x.to}*${x.weight}`).join("\n");
   return `${n}\n#\n${e}`;
 }
@@ -89,10 +97,10 @@ function mulberry32(seed: number): () => number {
 }
 
 export function computeLayout(nodesIn: GraphNodeInput[], edgesIn: GraphEdgeInput[]): GraphLayout {
-  const nodes = [...nodesIn].sort((a, b) => a.slug.localeCompare(b.slug));
+  const nodes = [...nodesIn].sort((a, b) => a.id.localeCompare(b.id));
   const n = nodes.length;
   const index = new Map<string, number>();
-  nodes.forEach((node, i) => index.set(node.slug, i));
+  nodes.forEach((node, i) => index.set(node.id, i));
 
   // Merge A->B and B->A into one undirected edge.
   const merged = new Map<string, PlacedEdge>();
@@ -114,15 +122,33 @@ export function computeLayout(nodesIn: GraphNodeInput[], edgesIn: GraphEdgeInput
     neighbors[e.b]!.push(e.a);
   }
 
-  const sizes = nodes.map((node) => pillSize(node.title, node.sections));
+  const sizes = nodes.map((node) => pillSize(node.title, node.sections, node.isMap));
   const k = 70;
   const side = Math.max(k * 2, Math.sqrt(Math.max(n, 1)) * k);
   const rand = mulberry32(hash(graphSignature(nodesIn, edgesIn)));
   const xs = new Float64Array(n);
   const ys = new Float64Array(n);
+  // Folder groups. Ghosts have no folder; their links place them.
+  const groups = new Map<string, number>();
+  const group = nodes.map((node) => {
+    if (!node.exists) return -1;
+    let g = groups.get(node.folder);
+    if (g === undefined) groups.set(node.folder, (g = groups.size));
+    return g;
+  });
+  const groupSize = new Float64Array(groups.size);
+  for (const g of group) if (g >= 0) groupSize[g]! += 1;
+  const cx = new Float64Array(groups.size);
+  const cy = new Float64Array(groups.size);
+
+  // Each folder starts around its own point on a circle, so islands do not have to untangle.
+  const ring = groups.size > 1 ? side * 0.35 : 0;
   for (let i = 0; i < n; i++) {
-    xs[i] = (rand() - 0.5) * side;
-    ys[i] = (rand() - 0.5) * side;
+    const g = group[i]!;
+    const angle = g >= 0 ? (g / groups.size) * Math.PI * 2 : rand() * Math.PI * 2;
+    const spread = g >= 0 ? side * 0.25 : side * 0.5;
+    xs[i] = Math.cos(angle) * ring + (rand() - 0.5) * spread;
+    ys[i] = Math.sin(angle) * ring + (rand() - 0.5) * spread;
   }
 
   if (n > 1) {
@@ -131,6 +157,7 @@ export function computeLayout(nodesIn: GraphNodeInput[], edgesIn: GraphEdgeInput
     const dy = new Float64Array(n);
     const k2 = k * k;
     const gravity = 0.6;
+    const clusterPull = 0.8;
     let temp = side / 8;
     const cool = temp / (iterations + 1);
     for (let it = 0; it < iterations; it++) {
@@ -163,7 +190,20 @@ export function computeLayout(nodesIn: GraphNodeInput[], edgesIn: GraphEdgeInput
         dx[e.b]! += ddx * f;
         dy[e.b]! += ddy * f;
       }
+      cx.fill(0);
+      cy.fill(0);
       for (let i = 0; i < n; i++) {
+        const g = group[i]!;
+        if (g < 0) continue;
+        cx[g]! += xs[i]!;
+        cy[g]! += ys[i]!;
+      }
+      for (let i = 0; i < n; i++) {
+        const g = group[i]!;
+        if (g >= 0 && groupSize[g]! > 1) {
+          dx[i]! += (cx[g]! / groupSize[g]! - xs[i]!) * clusterPull;
+          dy[i]! += (cy[g]! / groupSize[g]! - ys[i]!) * clusterPull;
+        }
         dx[i]! -= xs[i]! * gravity;
         dy[i]! -= ys[i]! * gravity;
         const len = Math.sqrt(dx[i]! * dx[i]! + dy[i]! * dy[i]!);

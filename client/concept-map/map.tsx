@@ -16,7 +16,7 @@ import {
 } from "react-native";
 import { notebookGraphRpc } from "../../shared/notebook";
 import { alpha, type Colors, MONO } from "../ui-kit";
-import { type GraphLayout, layoutFor, type PlacedNode } from "./layout";
+import { type GraphLayout, layoutFor, type PlacedNode, topFolder } from "./layout";
 
 /** Prefix shared with the notebook, so invalidating ["deck", "notebook"] refreshes the map too. */
 export const GRAPH_QUERY_KEY = ["deck", "notebook", "graph"] as const;
@@ -28,8 +28,24 @@ type Mode = "graph" | "list";
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 2.5;
 
+/** A translucent tint, or `fallback` when the color is not hex and cannot be tinted. */
+function tintOr(color: string, a: number, fallback: string): string {
+  const out = alpha(color, a);
+  return out === color ? fallback : out;
+}
+
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
+}
+
+/** Top-level folder -> color, rotating through the theme's distinct colors. */
+export function folderColors(lay: GraphLayout, c: Colors): Map<string, string> {
+  const rotation = [c.accent, c.statusSuccess, c.statusWarning, c.statusDanger, c.foreground];
+  const folders = [...new Set(lay.nodes.filter((n) => n.exists).map((n) => topFolder(n.folder)))].sort();
+  const out = new Map<string, string>();
+  let i = 0;
+  for (const f of folders) out.set(f, f === "" ? c.foregroundMuted : rotation[i++ % rotation.length]!);
+  return out;
 }
 
 function useGraph() {
@@ -79,10 +95,11 @@ const Node = memo(function Node(props: {
   ox: number;
   oy: number;
   state: NodeState;
+  tint: string;
   c: Colors;
-  onPress: (slug: string) => void;
+  onPress: (id: string) => void;
 }) {
-  const { node, zoom, ox, oy, state, c } = props;
+  const { node, zoom, ox, oy, state, tint, c } = props;
   const ghost = !node.exists;
   const selected = state === "selected";
   const neighbor = state === "neighbor";
@@ -93,7 +110,7 @@ const Node = memo(function Node(props: {
       accessibilityRole="button"
       accessibilityLabel={node.title}
       accessibilityState={{ selected }}
-      onPress={() => props.onPress(node.slug)}
+      onPress={() => props.onPress(node.id)}
       style={({ pressed }) => ({
         position: "absolute",
         left: ox + node.x * zoom - w / 2,
@@ -102,19 +119,17 @@ const Node = memo(function Node(props: {
         height: h,
         justifyContent: "center",
         alignItems: "center",
-        borderWidth: 1,
+        borderWidth: node.isMap || neighbor ? 2 : 1,
         borderStyle: ghost && !selected ? "dashed" : "solid",
         borderRadius: h / 2,
-        borderColor: selected || neighbor ? c.accent : ghost ? c.foregroundMuted : c.border,
+        borderColor: selected || neighbor ? c.accent : ghost ? c.foregroundMuted : tint,
         backgroundColor: selected
           ? c.accent
-          : neighbor
-            ? alpha(c.accent, 0.16)
-            : pressed
-              ? c.surface2
-              : ghost
-                ? c.surface0
-                : c.surface1,
+          : pressed
+            ? c.surface2
+            : ghost
+              ? c.surface0
+              : tintOr(tint, node.isMap ? 0.28 : 0.12, c.surface1),
         opacity: state === "dim" ? 0.28 : 1,
       })}
     >
@@ -124,7 +139,7 @@ const Node = memo(function Node(props: {
           color: selected ? c.accentForeground : ghost ? c.foregroundMuted : c.foreground,
           fontFamily: MONO,
           fontSize: Math.max(node.font * zoom, 1),
-          fontWeight: selected || node.sections >= 4 ? "700" : "400",
+          fontWeight: selected || node.isMap ? "700" : "400",
         }}
       >
         {node.label}
@@ -206,11 +221,11 @@ export function ConceptMap({
   useEffect(() => {
     const target = pendingScroll.current;
     if (!target) return;
-    const id = setTimeout(() => {
+    const timer = setTimeout(() => {
       pendingScroll.current = null;
       scrollTo(target.x, target.y);
     }, 30);
-    return () => clearTimeout(id);
+    return () => clearTimeout(timer);
   });
 
   const fitZoom = useCallback(() => {
@@ -219,9 +234,9 @@ export function ConceptMap({
   }, [lay, viewport]);
 
   const centerOn = useCallback(
-    (slug: string, z: number) => {
+    (id: string, z: number) => {
       if (!lay || !viewport) return;
-      const i = lay.index.get(slug);
+      const i = lay.index.get(id);
       if (i === undefined) return;
       const node = lay.nodes[i]!;
       const cw = Math.max(lay.width * z, viewport.w);
@@ -233,7 +248,7 @@ export function ConceptMap({
     [lay, viewport, applyView],
   );
 
-  // First placement: center the focused topic, else fit the whole map.
+  // First placement: center the focused note, else fit the whole map.
   useEffect(() => {
     if (placedOnce.current || !lay || !viewport || mode !== "graph") return;
     placedOnce.current = true;
@@ -263,19 +278,19 @@ export function ConceptMap({
   };
 
   const select = useCallback(
-    (slug: string | null, center = false) => {
-      setSelected(slug);
-      if (slug && center && mode === "graph") centerOn(slug, Math.max(zoom, 0.8));
+    (id: string | null, center = false) => {
+      setSelected(id);
+      if (id && center && mode === "graph") centerOn(id, Math.max(zoom, 0.8));
     },
     [centerOn, mode, zoom],
   );
-  const onNodePress = useCallback((slug: string) => setSelected((cur) => (cur === slug ? null : slug)), []);
+  const onNodePress = useCallback((id: string) => setSelected((cur) => (cur === id ? null : id)), []);
 
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q || !lay) return [];
     return lay.nodes
-      .filter((n) => n.title.toLowerCase().includes(q) || n.slug.toLowerCase().includes(q))
+      .filter((n) => n.title.toLowerCase().includes(q) || n.id.toLowerCase().includes(q))
       .sort((a, b) => {
         const as = a.title.toLowerCase().startsWith(q) ? 0 : 1;
         const bs = b.title.toLowerCase().startsWith(q) ? 0 : 1;
@@ -284,6 +299,8 @@ export function ConceptMap({
   }, [query, lay]);
 
   const s = useMemo(() => styles(c, compact), [c, compact]);
+  const colors = useMemo(() => (lay ? folderColors(lay, c) : new Map<string, string>()), [lay, c]);
+  const tintOf = (n: PlacedNode) => (n.exists ? (colors.get(topFolder(n.folder)) ?? c.foregroundMuted) : c.foregroundMuted);
 
   const onLayout = (e: LayoutChangeEvent) => {
     const { width, height } = e.nativeEvent.layout;
@@ -299,7 +316,7 @@ export function ConceptMap({
   const counts = useMemo(() => {
     if (!data) return null;
     const ghosts = data.nodes.filter((n) => !n.exists).length;
-    return { topics: data.nodes.length - ghosts, ghosts, links: lay?.edges.length ?? 0 };
+    return { notes: data.nodes.length - ghosts, ghosts, links: lay?.edges.length ?? 0 };
   }, [data, lay]);
 
   const button = (label: string, onPress: () => void, a11y: string, on = false) => (
@@ -319,7 +336,7 @@ export function ConceptMap({
       <Text style={s.title}>concept map</Text>
       {counts ? (
         <Text style={s.meta}>
-          {counts.topics} topics · {counts.links} links
+          {counts.notes} notes · {counts.links} links
           {counts.ghosts > 0 ? ` · ${counts.ghosts} unwritten` : ""}
         </Text>
       ) : null}
@@ -327,7 +344,7 @@ export function ConceptMap({
       <TextInput
         value={query}
         onChangeText={setQuery}
-        placeholder="find topic"
+        placeholder="find note"
         placeholderTextColor={c.foregroundMuted}
         autoCapitalize="none"
         autoCorrect={false}
@@ -335,7 +352,7 @@ export function ConceptMap({
         onSubmitEditing={() => {
           const first = matches[0];
           if (first) {
-            select(first.slug, true);
+            select(first.id, true);
             if (mode === "graph") setQuery("");
           }
         }}
@@ -364,7 +381,7 @@ export function ConceptMap({
     return (
       <View style={s.root}>
         {bar}
-        <Text style={s.error}>Couldn't read the notebook: {graph.error.message}</Text>
+        <Text style={s.error}>Couldn't read the vault: {graph.error.message}</Text>
       </View>
     );
   }
@@ -374,11 +391,11 @@ export function ConceptMap({
       <View style={s.root}>
         {bar}
         <View style={[s.center, { flex: 1, padding: 24, gap: 10 }]}>
-          <Text style={s.emptyTitle}>No topics yet</Text>
+          <Text style={s.emptyTitle}>No notes yet</Text>
           <Text style={s.emptyText}>
-            Topics come from notes you pin to the notebook: each topic is one markdown file in the vault. Writing [[Another
-            topic]] inside a note draws a link between the two. Links to topics that have no file yet show as dashed
-            outlines.
+            The map reads the Obsidian vault set as the notebook folder in Agent Deck settings. Every markdown note
+            becomes a node, colored by its top-level folder, and [[wikilinks]] between notes draw the edges. Notes you
+            pin from chat land there too. Links to notes that do not exist yet show as dashed outlines.
           </Text>
         </View>
       </View>
@@ -393,9 +410,9 @@ export function ConceptMap({
       s={s}
       floating={mode === "graph"}
       compact={compact}
-      onSelect={(slug) => select(slug, true)}
+      onSelect={(id) => select(id, true)}
       onClose={() => setSelected(null)}
-      onOpen={() => openScreen({ screenId: "notebook", params: { slug: selNode.slug } })}
+      onOpen={() => openScreen({ screenId: "notebook", params: { id: selNode.id } })}
     />
   ) : null;
 
@@ -404,10 +421,10 @@ export function ConceptMap({
       <View style={s.suggest}>
         {matches.slice(0, 8).map((n) => (
           <Pressable
-            key={n.slug}
+            key={n.id}
             accessibilityRole="button"
             onPress={() => {
-              select(n.slug, true);
+              select(n.id, true);
               setQuery("");
             }}
             style={({ pressed }) => s.chip(false, pressed, !n.exists)}
@@ -422,7 +439,7 @@ export function ConceptMap({
     return (
       <View style={s.root}>
         {bar}
-        <TopicList lay={lay} c={c} s={s} query={query} selected={selected} onSelect={setSelected} detail={detail} />
+        <TopicList lay={lay} c={c} s={s} colors={colors} query={query} selected={selected} onSelect={setSelected} detail={detail} />
       </View>
     );
   }
@@ -432,6 +449,18 @@ export function ConceptMap({
     <View style={s.root}>
       {bar}
       {suggestions}
+      <View style={s.legend}>
+        {[...colors].map(([folder, color]) => (
+          <Text key={folder || "/"} style={s.meta}>
+            <Text style={{ color }}>●</Text> {folder || "vault root"}
+          </Text>
+        ))}
+        {counts && counts.ghosts > 0 ? (
+          <Text style={s.meta}>
+            <Text style={{ color: c.foregroundMuted }}>○</Text> unwritten
+          </Text>
+        ) : null}
+      </View>
       <View style={{ flex: 1 }} onLayout={onLayout}>
         {viewport ? (
           <ScrollView
@@ -472,12 +501,13 @@ export function ConceptMap({
                 })}
                 {lay.nodes.map((n, i) => (
                   <Node
-                    key={n.slug}
+                    key={n.id}
                     node={n}
                     zoom={zoom}
                     ox={ox}
                     oy={oy}
                     c={c}
+                    tint={tintOf(n)}
                     onPress={onNodePress}
                     state={!hasSel ? "normal" : i === selIndex ? "selected" : neighborSet.has(i) ? "neighbor" : "dim"}
                   />
@@ -515,11 +545,11 @@ function Detail({
   s: Styles;
   floating: boolean;
   compact: boolean;
-  onSelect: (slug: string) => void;
+  onSelect: (id: string) => void;
   onClose: () => void;
   onOpen: () => void;
 }) {
-  const links = linksOf(lay, lay.index.get(node.slug)!);
+  const links = linksOf(lay, lay.index.get(node.id)!);
   const place = floating
     ? compact
       ? { position: "absolute" as const, left: 0, right: 0, bottom: 0, maxHeight: "50%" as const }
@@ -535,7 +565,9 @@ function Detail({
           </Pressable>
         ) : null}
       </View>
+      {node.exists && node.folder ? <Text style={s.meta}>{node.folder}/</Text> : null}
       <Text style={s.meta}>
+        {node.isMap ? "map · " : ""}
         {node.exists ? `${node.sections} section${node.sections === 1 ? "" : "s"}` : "not written yet"} · {links.length}{" "}
         link{links.length === 1 ? "" : "s"}
       </Text>
@@ -546,9 +578,9 @@ function Detail({
         <ScrollView style={{ flexGrow: 0 }} contentContainerStyle={s.chips}>
           {links.map((n) => (
             <Pressable
-              key={n.slug}
+              key={n.id}
               accessibilityRole="button"
-              onPress={() => onSelect(n.slug)}
+              onPress={() => onSelect(n.id)}
               style={({ pressed }) => s.chip(false, pressed, !n.exists)}
             >
               <Text style={s.chipText(false, !n.exists)}>{n.label}</Text>
@@ -575,6 +607,7 @@ function TopicList({
   lay,
   c,
   s,
+  colors,
   query,
   selected,
   onSelect,
@@ -583,43 +616,66 @@ function TopicList({
   lay: GraphLayout;
   c: Colors;
   s: Styles;
+  colors: Map<string, string>;
   query: string;
   selected: string | null;
-  onSelect: (slug: string | null) => void;
+  onSelect: (id: string | null) => void;
   detail: React.ReactNode;
 }) {
   const q = query.trim().toLowerCase();
-  const rows = useMemo(() => {
-    return lay.nodes
-      .map((n, i) => ({ n, degree: lay.neighbors[i]!.length }))
-      .filter(({ n }) => !q || n.title.toLowerCase().includes(q) || n.slug.toLowerCase().includes(q))
-      .sort((a, b) => Number(b.n.exists) - Number(a.n.exists) || b.degree - a.degree || a.n.title.localeCompare(b.n.title));
+  const groups = useMemo(() => {
+    const byFolder = new Map<string, { n: PlacedNode; degree: number }[]>();
+    lay.nodes.forEach((n, i) => {
+      if (q && !n.title.toLowerCase().includes(q) && !n.id.toLowerCase().includes(q)) return;
+      const key = n.exists ? n.folder : "\uffff";
+      const list = byFolder.get(key) ?? [];
+      list.push({ n, degree: lay.neighbors[i]!.length });
+      byFolder.set(key, list);
+    });
+    for (const list of byFolder.values()) {
+      list.sort((a, b) => Number(b.n.isMap) - Number(a.n.isMap) || a.n.title.localeCompare(b.n.title));
+    }
+    return [...byFolder].sort(([a], [b]) => a.localeCompare(b));
   }, [lay, q]);
   return (
     <ScrollView style={{ flex: 1 }}>
-      {rows.length === 0 ? <Text style={[s.meta, { padding: 16 }]}>No topic matches "{query}".</Text> : null}
-      {rows.map(({ n, degree }) => {
-        const on = n.slug === selected;
+      {groups.length === 0 ? <Text style={[s.meta, { padding: 16 }]}>No note matches "{query}".</Text> : null}
+      {groups.map(([folder, rows]) => {
+        const ghosts = folder === "\uffff";
+        const color = ghosts ? c.foregroundMuted : (colors.get(topFolder(folder)) ?? c.foregroundMuted);
         return (
-          <View key={n.slug}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityState={{ selected: on }}
-              onPress={() => onSelect(on ? null : n.slug)}
-              style={({ pressed }) => s.row(on, pressed)}
-            >
-              <Text style={{ color: on ? c.accent : c.foregroundMuted, fontFamily: MONO, fontSize: 12 }}>
-                {n.exists ? (on ? "▾" : "▸") : "○"}
-              </Text>
-              <Text numberOfLines={1} style={[s.rowTitle(n.exists), { flex: 1 }]}>
-                {n.title}
-              </Text>
-              <Text style={s.meta}>
-                {n.exists ? `${n.sections}§ ` : ""}
-                {degree}↔
-              </Text>
-            </Pressable>
-            {on ? detail : null}
+          <View key={folder}>
+            <Text style={s.groupHead}>
+              <Text style={{ color }}>{ghosts ? "○" : "●"}</Text> {ghosts ? "unwritten" : folder || "vault root"}
+            </Text>
+            {rows.map(({ n, degree }) => {
+              const on = n.id === selected;
+              return (
+                <View key={n.id}>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: on }}
+                    onPress={() => onSelect(on ? null : n.id)}
+                    style={({ pressed }) => s.row(on, pressed)}
+                  >
+                    <Text style={{ color: on ? c.accent : c.foregroundMuted, fontFamily: MONO, fontSize: 12 }}>
+                      {on ? "▾" : "▸"}
+                    </Text>
+                    <Text
+                      numberOfLines={1}
+                      style={[s.rowTitle(n.exists), { flex: 1 }, n.isMap ? { fontWeight: "700" as const } : null]}
+                    >
+                      {n.title}
+                    </Text>
+                    <Text style={s.meta}>
+                      {n.exists ? `${n.sections}§ ` : ""}
+                      {degree}↔
+                    </Text>
+                  </Pressable>
+                  {on ? detail : null}
+                </View>
+              );
+            })}
           </View>
         );
       })}
@@ -643,7 +699,6 @@ function styles(c: Colors, compact: boolean) {
       borderBottomWidth: 1,
       borderColor: c.border,
     },
-    group: { flexDirection: "row" as const, gap: 4 },
     title: { color: c.foreground, fontFamily: MONO, fontWeight: "700" as const, fontSize: 13 },
     meta: { color: c.foregroundMuted, fontFamily: MONO, fontSize: 12 },
     input: {
@@ -679,6 +734,27 @@ function styles(c: Colors, compact: boolean) {
       borderColor: c.border,
       backgroundColor: c.surface1,
     },
+    legend: {
+      flexDirection: "row" as const,
+      flexWrap: "wrap" as const,
+      gap: 12,
+      paddingHorizontal: 12,
+      paddingVertical: 4,
+      borderBottomWidth: 1,
+      borderColor: c.border,
+    },
+    group: { flexDirection: "row" as const, gap: 4 },
+    groupHead: {
+      color: c.foregroundMuted,
+      fontFamily: MONO,
+      fontSize: 11,
+      fontWeight: "700" as const,
+      paddingHorizontal: 12,
+      paddingTop: 12,
+      paddingBottom: 4,
+      borderBottomWidth: 1,
+      borderColor: c.border,
+    },
     chips: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 6 },
     chip: (on: boolean, pressed: boolean, ghost: boolean) => ({
       paddingHorizontal: 8,
@@ -709,7 +785,7 @@ function styles(c: Colors, compact: boolean) {
       minHeight: 34,
       borderBottomWidth: 1,
       borderColor: c.border,
-      backgroundColor: on ? alpha(c.accent, 0.12) : pressed ? c.surface2 : "transparent",
+      backgroundColor: on ? tintOr(c.accent, 0.12, c.surface2) : pressed ? c.surface2 : "transparent",
     }),
     rowTitle: (exists: boolean) => ({
       color: exists ? c.foreground : c.foregroundMuted,
