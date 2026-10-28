@@ -18,7 +18,7 @@ import {
   type Quiz,
   type Steps,
   titleFor,
-} from "./parse";
+} from "../../shared/learning-parse";
 
 /** Fence languages drawn as learning cards. */
 export const LEARNING_LANGS = new Set<string>(Object.keys(KIND_BY_LANG));
