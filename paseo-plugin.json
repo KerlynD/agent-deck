@@ -1,0 +1,15 @@
+{
+  "id": "agent-deck",
+  "name": "Agent Deck",
+  "description": "Rice for Paseo: a btop-style agents table, an inbox with quick approvals, usage meters, a syntax-highlighted chat view, a command-line composer and palettes.",
+  "requirements": {
+    "paseo": ">=0.12.0"
+  },
+  "build": [
+    [
+      "npm",
+      "ci",
+      "--include=dev"
+    ]
+  ]
+}
