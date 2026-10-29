@@ -3,6 +3,7 @@ import { useRpc, useSettings } from "@getpaseo/plugin/client";
 import { memo, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, type TextStyle, View } from "react-native";
 import { notebookPinRpc } from "../../shared/notebook";
+import { notePinned } from "../notebook/events";
 import { deckSettings } from "../../shared/settings";
 import { CodeView } from "../code-view";
 import { alpha, type Colors, MONO } from "../ui-kit";
@@ -397,7 +398,10 @@ function usePin(block: Parsed, info: string, code: string, agentId: string | und
       request = Promise.reject(err);
     }
     request.then(
-      () => alive.current && setState({ status: "done" }),
+      () => {
+        notePinned();
+        if (alive.current) setState({ status: "done" });
+      },
       (err: unknown) => alive.current && setState({ status: "error", message: err instanceof Error ? err.message : String(err) }),
     );
   };
